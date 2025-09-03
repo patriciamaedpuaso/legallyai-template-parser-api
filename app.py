@@ -15,6 +15,7 @@ CORS(app)
 
 # ---------- Helpers for Delta → DOCX ----------
 def apply_attributes(run, attrs):
+    """Apply text styles like bold, italic, underline, color."""
     if not attrs:
         return
     if attrs.get("bold"):
@@ -29,10 +30,13 @@ def apply_attributes(run, attrs):
             r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
             run.font.color.rgb = RGBColor(r, g, b)
 
+
 def add_paragraph(doc, text, attrs, align=None):
+    """Insert a paragraph with attributes + alignment."""
     para = doc.add_paragraph()
     run = para.add_run(text)
     apply_attributes(run, attrs)
+
     if align:
         if align == "center":
             para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
@@ -42,13 +46,18 @@ def add_paragraph(doc, text, attrs, align=None):
             para.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
         else:
             para.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+
     return para
 
+
 def add_table(doc, table_data):
+    """Insert a table from Quill Delta custom embed { insert: { table: ... } }."""
     rows = table_data.get("rows", [])
     if not rows:
         return
-    num_cols = len(rows[0].keys())
+
+    # Handle uneven rows by finding max columns
+    num_cols = max(len(row.keys()) for row in rows)
     table = doc.add_table(rows=len(rows), cols=num_cols)
 
     for r_idx, row in enumerate(rows):
@@ -62,6 +71,7 @@ def add_table(doc, table_data):
 
 
 def delta_to_docx(delta, output_path):
+    """Convert a Quill Delta JSON into a DOCX file."""
     doc = Document()
 
     for op in delta:
@@ -144,12 +154,22 @@ def convert_delta_to_docx():
             delta_to_docx(delta, tmp.name)
             tmp_path = tmp.name
 
-        return send_file(
+        response = send_file(
             tmp_path,
             as_attachment=True,
             download_name="document.docx",
             mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
         )
+
+        # Clean up temp file after sending
+        @response.call_on_close
+        def cleanup():
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                pass
+
+        return response
     except Exception as e:
         return jsonify({"error": str(e)}), 500
 
