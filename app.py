@@ -3,13 +3,88 @@ from flask_cors import CORS
 import io
 import pdfkit
 from docx import Document
+from docx.shared import RGBColor
+from docx.enum.text import WD_PARAGRAPH_ALIGNMENT
 from html2docx import html2docx
+import tempfile
+import os
 
 app = Flask(__name__)
 CORS(app)
 
 
-# --- DOCX Export (with formatting + tables) ---
+# ---------- Helpers for Delta → DOCX ----------
+def apply_attributes(run, attrs):
+    if not attrs:
+        return
+    if attrs.get("bold"):
+        run.bold = True
+    if attrs.get("italic"):
+        run.italic = True
+    if attrs.get("underline"):
+        run.underline = True
+    if attrs.get("color"):
+        hex_color = attrs["color"].lstrip("#")
+        if len(hex_color) == 6:
+            r, g, b = tuple(int(hex_color[i:i+2], 16) for i in (0, 2, 4))
+            run.font.color.rgb = RGBColor(r, g, b)
+
+def add_paragraph(doc, text, attrs, align=None):
+    para = doc.add_paragraph()
+    run = para.add_run(text)
+    apply_attributes(run, attrs)
+    if align:
+        if align == "center":
+            para.alignment = WD_PARAGRAPH_ALIGNMENT.CENTER
+        elif align == "right":
+            para.alignment = WD_PARAGRAPH_ALIGNMENT.RIGHT
+        elif align == "justify":
+            para.alignment = WD_PARAGRAPH_ALIGNMENT.JUSTIFY
+        else:
+            para.alignment = WD_PARAGRAPH_ALIGNMENT.LEFT
+    return para
+
+def add_table(doc, table_data):
+    rows = table_data.get("rows", [])
+    if not rows:
+        return
+    num_cols = len(rows[0].keys())
+    table = doc.add_table(rows=len(rows), cols=num_cols)
+
+    for r_idx, row in enumerate(rows):
+        for c_idx, (col_key, cell_ops) in enumerate(row.items()):
+            cell = table.cell(r_idx, c_idx)
+            para = cell.paragraphs[0]
+            for op in cell_ops:
+                if isinstance(op.get("insert"), str):
+                    run = para.add_run(op["insert"])
+                    apply_attributes(run, op.get("attributes"))
+
+
+def delta_to_docx(delta, output_path):
+    doc = Document()
+
+    for op in delta:
+        insert_val = op.get("insert")
+        attrs = op.get("attributes", {})
+
+        # Plain text
+        if isinstance(insert_val, str):
+            if insert_val == "\n":
+                doc.add_paragraph("")  # line break
+            else:
+                add_paragraph(doc, insert_val, attrs, attrs.get("align"))
+
+        # Table
+        elif isinstance(insert_val, dict) and "table" in insert_val:
+            add_table(doc, insert_val["table"])
+
+    doc.save(output_path)
+
+
+# ---------- Endpoints ----------
+
+# HTML → DOCX
 @app.route('/convert/html-to-docx', methods=['POST'])
 def html_to_docx():
     try:
@@ -19,7 +94,6 @@ def html_to_docx():
         if not html:
             return jsonify({"error": "No HTML content provided"}), 400
 
-        # Create a new DOCX file
         output = io.BytesIO()
         doc = Document()
         html2docx(html, doc)
@@ -36,7 +110,7 @@ def html_to_docx():
         return jsonify({"error": str(e)}), 500
 
 
-# --- PDF Export (with formatting + tables) ---
+# HTML → PDF
 @app.route('/convert/html-to-pdf', methods=['POST'])
 def html_to_pdf():
     try:
@@ -46,7 +120,6 @@ def html_to_pdf():
         if not html:
             return jsonify({"error": "No HTML content provided"}), 400
 
-        # Convert HTML to PDF using pdfkit (wkhtmltopdf backend)
         pdf_bytes = pdfkit.from_string(html, False)
 
         return send_file(
@@ -59,11 +132,38 @@ def html_to_pdf():
         return jsonify({"error": str(e)}), 500
 
 
+# Delta → DOCX
+@app.route('/convert/delta-to-docx', methods=['POST'])
+def convert_delta_to_docx():
+    try:
+        delta = request.json.get("delta")
+        if not delta:
+            return jsonify({"error": "No delta provided"}), 400
+
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".docx") as tmp:
+            delta_to_docx(delta, tmp.name)
+            tmp_path = tmp.name
+
+        return send_file(
+            tmp_path,
+            as_attachment=True,
+            download_name="document.docx",
+            mimetype="application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+        )
+    except Exception as e:
+        return jsonify({"error": str(e)}), 500
+
+
+# Home
 @app.route('/')
 def home():
     return jsonify({
         "status": "API running",
-        "endpoints": ["/convert/html-to-docx", "/convert/html-to-pdf"]
+        "endpoints": [
+            "/convert/html-to-docx",
+            "/convert/html-to-pdf",
+            "/convert/delta-to-docx"
+        ]
     })
 
 
